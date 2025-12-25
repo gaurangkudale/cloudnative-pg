@@ -93,7 +93,6 @@ jobs:
   change-triage:
     name: Check changed files
     needs: duplicate_runs
-    if: ${{ needs.duplicate_runs.outputs.should_skip != 'true' }}
     runs-on: ubuntu-24.04
     outputs:
       docs-changed: ${{ steps.filter.outputs.docs-changed }}
@@ -151,7 +150,6 @@ jobs:
       - duplicate_runs
       - change-triage
     # We need always run linter as go linter is a required check
-    if: needs.duplicate_runs.outputs.should_skip != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
@@ -214,10 +212,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    # Run shellcheck linter only if shell code has changed
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      needs.change-triage.outputs.shell-script-changed == 'true'
     runs-on: ubuntu-24.04
     env:
         SHELLCHECK_OPTS: -a -S style
@@ -272,13 +266,6 @@ jobs:
       - duplicate_runs
       - change-triage
       - generate-unit-tests-jobs
-    # Run unit tests only if the operator or the Go codebase have changed
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      (
-        needs.change-triage.outputs.operator-changed == 'true' ||
-        needs.change-triage.outputs.go-code-changed == 'true'
-      )
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -315,13 +302,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    # Run make apidoc if Go code or docs have changed
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      (
-        needs.change-triage.outputs.go-code-changed == 'true' ||
-        needs.change-triage.outputs.docs-changed == 'true'
-      )
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
@@ -350,13 +330,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    # Run make manifests if Go code have changed
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      (
-        needs.change-triage.outputs.go-code-changed == 'true' ||
-        needs.change-triage.outputs.operator-changed == 'true'
-      )
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
