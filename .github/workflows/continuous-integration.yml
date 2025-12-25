@@ -394,22 +394,6 @@ jobs:
     #   if there have been any code changes OR it is a scheduled execution
     #   AND
     #   none of the preceding jobs failed
-    if: |
-      (always() && !cancelled()) &&
-      (
-        needs.duplicate_runs.outputs.should_skip != 'true' &&
-        (
-          needs.change-triage.outputs.operator-changed == 'true' ||
-          needs.change-triage.outputs.test-changed == 'true' ||
-          needs.change-triage.outputs.shell-script-changed == 'true' ||
-          needs.change-triage.outputs.go-code-changed == 'true'
-        )
-      ) &&
-      (needs.go-linters.result == 'success' || needs.go-linters.result == 'skipped') &&
-      (needs.shellcheck.result == 'success' || needs.shellcheck.result == 'skipped') &&
-      (needs.tests.result == 'success' || needs.tests.result == 'skipped') &&
-      (needs.apidoc.result == 'success' || needs.apidoc.result == 'skipped') &&
-      (needs.crd.result == 'success' || needs.crd.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -644,10 +628,6 @@ jobs:
       packages: write
     needs:
       - buildx
-    if: |
-      (always() && !cancelled()) &&
-      needs.buildx.result == 'success' &&
-      needs.buildx.outputs.push == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
