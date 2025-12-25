@@ -57,7 +57,6 @@ jobs:
     permissions:
       actions: write
     name: smoke test release-* branches when it's a scheduled run
-    if: github.event_name == 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -177,9 +176,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      needs.change-triage.outputs.renovate-changed == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
@@ -193,12 +189,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      (
-        needs.change-triage.outputs.operator-changed == 'true' ||
-        needs.change-triage.outputs.go-code-changed == 'true'
-      )
     runs-on: ubuntu-24.04
     steps:
       - name: Run govulncheck
@@ -227,13 +217,6 @@ jobs:
     needs:
       - duplicate_runs
       - change-triage
-    # Generate unit tests jobs only if the operator or the Go codebase have changed
-    if: |
-      needs.duplicate_runs.outputs.should_skip != 'true' &&
-      (
-        needs.change-triage.outputs.operator-changed == 'true' ||
-        needs.change-triage.outputs.go-code-changed == 'true'
-      )
     runs-on: ubuntu-24.04
     outputs:
       k8sMatrix: ${{ steps.get-k8s-versions.outputs.k8s_versions }}
@@ -288,12 +271,10 @@ jobs:
           make test
 
       - name: Coverage Summary
-        if: matrix.k8s-version == needs.generate-unit-tests-jobs.outputs.latest_k8s_version
         run: |
           go tool cover -func=cover.out -o coverage.out
 
       - name: Publish unit test summary on the latest k8s version
-        if: matrix.k8s-version == needs.generate-unit-tests-jobs.outputs.latest_k8s_version
         run: |
           echo "Unit test coverage: $(tail -n 1 coverage.out | awk '{print $3}')" >> $GITHUB_STEP_SUMMARY
 
@@ -433,7 +414,6 @@ jobs:
       # from a forked repository, so we avoid pushing to the container registry if
       # that's the case.
       - name: Evaluate container image push
-        if: github.event_name == 'pull_request'
         env:
           BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
@@ -450,13 +430,6 @@ jobs:
 
       - name: Run GoReleaser to build kubectl plugin
         uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
-        if: |
-          github.event_name == 'schedule' ||
-          (
-            github.event_name == 'workflow_dispatch' &&
-            startsWith(github.head_ref, 'release-') ||
-            startsWith(github.ref_name, 'release-')
-          )
         with:
           distribution: goreleaser
           version: v2
@@ -470,17 +443,6 @@ jobs:
       # To avoid message overflow, we only report runs scheduled on main or release branches
       - name: Slack Notification
         uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2
-        if: |
-          failure() &&
-          github.repository_owner == env.REPOSITORY_OWNER &&
-          (
-            github.event_name == 'schedule' ||
-            (
-              github.event_name == 'workflow_dispatch' &&
-              startsWith(github.head_ref, 'release-') ||
-              startsWith(github.ref_name, 'release-')
-            )
-          )
         env:
           SLACK_COLOR: ${{ job.status }}
           SLACK_ICON: https://avatars.githubusercontent.com/u/85171364?size=48
@@ -532,7 +494,6 @@ jobs:
           targets: "default"
 
       - name: Output images
-        if: env.PUSH == 'true'
         env:
           DISTROLESS: ${{ fromJSON(steps.bake-push.outputs.metadata)['distroless']['image.name'] }}
           UBI: ${{ fromJSON(steps.bake-push.outputs.metadata)['ubi']['image.name'] }}
@@ -544,7 +505,6 @@ jobs:
 
       - name: Dockle scan distroless image
         uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
-        if: env.PUSH == 'true'
         with:
           image: ${{ env.CONTROLLER_IMG }}
           exit-code: '1'
@@ -553,7 +513,6 @@ jobs:
 
       - name: Dockle scan UBI image
         uses: erzz/dockle-action@69369bc745ee29813f730231a821bcd4f71cd290 # v1
-        if: env.PUSH == 'true'
         env:
           DOCKLE_IGNORES: CIS-DI-0009
         with:
@@ -564,9 +523,6 @@ jobs:
 
       - name: Run Snyk to check Docker image for vulnerabilities
         uses: snyk/actions/docker@9adf32b1121593767fc3c057af55b55db032dc04 # master
-        if: |
-          !github.event.repository.fork &&
-          !github.event.pull_request.head.repo.fork
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -574,18 +530,12 @@ jobs:
           args: --severity-threshold=high --file=Dockerfile --username=${{ env.REGISTRY_USER }} --password=${{ env.REGISTRY_PASSWORD }}
 
       - name: Install cosign
-        if: |
-          env.SIGN_IMAGES == 'true' &&
-          env.PUSH == 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
         # See https://github.blog/security/supply-chain-security/safeguard-container-signing-capability-actions/
         # and https://github.com/actions/starter-workflows/blob/main/ci/docker-publish.yml for more details on
         # how to use cosign.
 
       - name: Sign images
-        if: |
-          env.SIGN_IMAGES == 'true' &&
-          env.PUSH == 'true'
         run: |
           images=$(echo '${{ steps.bake-push.outputs.metadata }}' |
             jq -r '.[] | (."image.name" | sub(",.*";"" )) + "@" + ."containerimage.digest"'
@@ -654,9 +604,6 @@ jobs:
     needs:
       - buildx
       - olm-bundle
-    if: |
-      (always() && !cancelled()) &&
-      needs.olm-bundle.result == 'success'
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
