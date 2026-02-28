@@ -45,6 +45,7 @@ import (
 	"github.com/cloudnative-pg/machinery/pkg/fileutils/compatibility"
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.uber.org/atomic"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 
@@ -53,6 +54,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/pool"
 	postgresutils "github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/utils"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/replicaclusterswitch/conditions"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 
@@ -169,33 +171,23 @@ type Instance struct {
 	// adding the PostgreSQL CNPGConfigSha256 parameter
 	ConfigSha256 string
 
-	// PgCtlTimeoutForPromotion specifies the maximum number of seconds to wait when waiting for promotion to complete
-	PgCtlTimeoutForPromotion int32
-
-	// specifies the maximum number of seconds to wait when shutting down for a switchover
-	MaxSwitchoverDelay int32
-
 	// pgVersion is the PostgreSQL version
 	pgVersion *semver.Version
 
 	// instanceCommandChan is a channel for requesting actions on the instance
 	instanceCommandChan chan InstanceCommand
 
+	// SessionID is a unique identifier generated at instance manager startup.
+	// This ID changes on every instance manager restart, including reboots that don't
+	// change the container ID. Used to detect if the instance manager was restarted
+	// during long-running operations like backups.
+	SessionID string
+
 	// InstanceManagerIsUpgrading tells if there is an instance manager upgrade in process
 	InstanceManagerIsUpgrading atomic.Bool
 
 	// PgRewindIsRunning tells if there is a `pg_rewind` process running
 	PgRewindIsRunning bool
-
-	// MaxStopDelay is the current MaxStopDelay of the cluster
-	MaxStopDelay int32
-
-	// SmartStopDelay is used to control PostgreSQL smart shutdown timeout
-	SmartStopDelay int32
-
-	// RequiresDesignatedPrimaryTransition indicates if this instance is a primary that needs to become
-	// a designatedPrimary
-	RequiresDesignatedPrimaryTransition bool
 
 	// canCheckReadiness specifies whether the instance can start being checked for readiness
 	// Is set to true before the instance is run and to false once it exits,
@@ -226,8 +218,9 @@ type Instance struct {
 
 	serverCertificateHandler serverCertificateHandler
 
-	// Cluster is the cluster this instance belongs to
-	Cluster *apiv1.Cluster
+	// cluster is the cached cluster this instance belongs to.
+	// Access via GetClusterOrDefault() which returns an empty cluster if nil.
+	cluster *apiv1.Cluster
 }
 
 type serverCertificateHandler struct {
@@ -296,6 +289,47 @@ func (instance *Instance) SetFencing(enabled bool) {
 // SetCanCheckReadiness marks whether the instance should be checked for readiness
 func (instance *Instance) SetCanCheckReadiness(enabled bool) {
 	instance.canCheckReadiness.Store(enabled)
+}
+
+// GetClusterOrDefault returns the cached cluster, or an empty cluster if not set.
+// The empty cluster provides safe defaults via getter methods.
+func (instance *Instance) GetClusterOrDefault() *apiv1.Cluster {
+	if instance.cluster == nil {
+		return &apiv1.Cluster{}
+	}
+	return instance.cluster
+}
+
+// SetCluster updates the cached cluster for use outside the reconciliation
+// cycle when the API client is not available
+func (instance *Instance) SetCluster(cluster *apiv1.Cluster) {
+	instance.cluster = cluster
+}
+
+// RequiresDesignatedPrimaryTransition checks if this instance is a primary
+// that needs to become a designated primary in a replica cluster
+func (instance *Instance) RequiresDesignatedPrimaryTransition() bool {
+	cluster := instance.GetClusterOrDefault()
+
+	if !cluster.IsReplica() {
+		return false
+	}
+
+	if !conditions.IsDesignatedPrimaryTransitionRequested(cluster) {
+		return false
+	}
+
+	if !instance.IsFenced() && !instance.MightBeUnavailable() {
+		return false
+	}
+
+	// Check if this pod was the primary before the transition started.
+	// We use CurrentPrimary instead of IsPrimary() because IsPrimary()
+	// checks for the absence of standby.signal, which gets created during
+	// the transition by RefreshReplicaConfiguration(). Using CurrentPrimary
+	// keeps the sentinel true throughout the transition, allowing retries
+	// if the status update fails due to optimistic locking conflicts.
+	return cluster.Status.CurrentPrimary == instance.GetPodName()
 }
 
 // CheckHasDiskSpaceForWAL checks if we have enough disk space to store two WAL files,
@@ -402,6 +436,7 @@ func NewInstance() *Instance {
 		slotsReplicatorChan:        make(chan *apiv1.ReplicationSlotsConfiguration),
 		roleSynchronizerChan:       make(chan *apiv1.ManagedConfiguration),
 		tablespaceSynchronizerChan: make(chan map[string]apiv1.TablespaceConfiguration),
+		SessionID:                  string(uuid.NewUUID()),
 	}
 }
 
@@ -567,11 +602,13 @@ func (instance *Instance) TryShuttingDownSmartFast(ctx context.Context) error {
 
 	var err error
 
-	smartTimeout := instance.SmartStopDelay
-	if instance.MaxStopDelay <= instance.SmartStopDelay {
+	cluster := instance.GetClusterOrDefault()
+	smartTimeout := cluster.GetSmartShutdownTimeout()
+	maxStopDelay := cluster.GetMaxStopDelay()
+	if maxStopDelay <= smartTimeout {
 		contextLogger.Warning("Ignoring maxStopDelay <= smartShutdownTimeout",
-			"smartShutdownTimeout", instance.SmartStopDelay,
-			"maxStopDelay", instance.MaxStopDelay,
+			"smartShutdownTimeout", smartTimeout,
+			"maxStopDelay", maxStopDelay,
 		)
 		smartTimeout = 0
 	}
@@ -617,12 +654,13 @@ func (instance *Instance) TryShuttingDownFastImmediate(ctx context.Context) erro
 	contextLogger := log.FromContext(ctx)
 
 	contextLogger.Info("Requesting fast shutdown of the PostgreSQL instance")
+	maxSwitchoverDelay := instance.GetClusterOrDefault().GetMaxSwitchoverDelay()
 	err := instance.Shutdown(
 		ctx,
 		shutdownOptions{
 			Mode:    shutdownModeFast,
 			Wait:    true,
-			Timeout: &instance.MaxSwitchoverDelay,
+			Timeout: &maxSwitchoverDelay,
 		},
 	)
 	var exitError *exec.ExitError
@@ -741,13 +779,9 @@ func (instance *Instance) buildPostgresEnv() []string {
 	envMap["PG_OOM_ADJUST_FILE"] = "/proc/self/oom_score_adj"
 	envMap["PG_OOM_ADJUST_VALUE"] = "0"
 
-	if instance.Cluster == nil {
-		return envMap.StringSlice()
-	}
-
 	// If there are no additional library paths, we use the environment variables
 	// of the current process
-	additionalLibraryPaths := collectLibraryPaths(instance.Cluster.Spec.PostgresConfiguration.Extensions)
+	additionalLibraryPaths := collectLibraryPaths(instance.GetClusterOrDefault().Spec.PostgresConfiguration.Extensions)
 	if len(additionalLibraryPaths) == 0 {
 		return envMap.StringSlice()
 	}

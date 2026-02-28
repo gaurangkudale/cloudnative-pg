@@ -107,7 +107,7 @@ func NewClusterReconciler(
 		DiscoveryClient: discoveryClient,
 		Client:          operatorclient.NewExtendedClient(mgr.GetClient()),
 		Scheme:          mgr.GetScheme(),
-		Recorder:        mgr.GetEventRecorderFor("cloudnative-pg"),
+		Recorder:        mgr.GetEventRecorderFor("cloudnative-pg"), //nolint:staticcheck
 		Plugins:         plugins,
 		rolloutManager: rolloutManager.New(
 			configuration.Current.GetClustersRolloutDelay(),
@@ -621,7 +621,7 @@ func (r *ClusterReconciler) requireWALArchivingPluginOrDelete(
 	contextLogger := log.FromContext(ctx).WithName("require_wal_archiving_plugin_delete")
 
 	for _, state := range instances.Items {
-		if !isTerminatedBecauseOfMissingWALArchivePlugin(state.Pod) {
+		if isTerminatedBecauseOfMissingWALArchivePlugin(state.Pod) {
 			contextLogger.Warning(
 				"Detected instance manager initialization procedure that failed "+
 					"because the required WAL archive plugin is missing. Deleting it to trigger rollout",
@@ -1003,6 +1003,14 @@ func (r *ClusterReconciler) reconcilePods(
 		return r.createPrimaryInstance(ctx, cluster)
 	}
 
+	// Handle instances marked as unrecoverable before waiting for pods to be ready.
+	// This ensures pods annotated with alpha.cnpg.io/unrecoverable=true are
+	// deleted even when they can't report their status (e.g., postgres process
+	// not running, startup probe failing).
+	if res, err := r.reconcileUnrecoverableInstances(ctx, cluster, resources); !res.IsZero() || err != nil {
+		return res, err
+	}
+
 	// Stop acting here if there are non-ready Pods unless in maintenance reusing PVCs.
 	// The user have chosen to wait for the missing nodes to come up
 	if !(cluster.IsNodeMaintenanceWindowInProgress() && cluster.IsReusePVCEnabled()) &&
@@ -1021,11 +1029,6 @@ func (r *ClusterReconciler) reconcilePods(
 			return ctrl.Result{}, fmt.Errorf("cannot generate node serial: %w", err)
 		}
 		return r.joinReplicaInstance(ctx, newNodeSerial, cluster)
-	}
-
-	// Are there nodes to be removed? Remove one of them
-	if res, err := r.reconcileUnrecoverableInstances(ctx, cluster, resources); !res.IsZero() || err != nil {
-		return res, err
 	}
 
 	// Should we scale down the cluster?

@@ -11,7 +11,7 @@ permissions: read-all
 
 env:
   # renovate: datasource=golang-version depName=golang versioning=loose
-  GOLANG_VERSION: "1.25.5"
+  GOLANG_VERSION: "1.25.7"
   REGISTRY: "ghcr.io"
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # To identify the commit we need the history and all the tags.
           fetch-depth: 0
@@ -58,12 +58,13 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
     needs:
       - check-version
     steps:
       -
         name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       -
         name: Get tag
         run: |
@@ -81,13 +82,26 @@ jobs:
             --out-file /src/release_notes.md \
             /src/docs/src/${{ env.FILE }}
       -
+        name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        # See https://github.blog/security/supply-chain-security/safeguard-container-signing-capability-actions/
+        # and https://github.com/actions/starter-workflows/blob/main/ci/docker-publish.yml for more details on
+        # how to use cosign.
+      -
+        name: Sign yaml files
+        run: |
+          cosign sign-blob releases/cnpg-${{ env.VERSION }}.yaml \
+          --bundle releases/cnpg-${{ env.VERSION }}.sigstore.json --yes
+      -
         name: Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           body_path: release_notes.md
           draft: false
           name: v${{ env.TAG }}
-          files: releases/cnpg-${{ env.VERSION }}.yaml
+          files: |
+            releases/cnpg-${{ env.VERSION }}.yaml
+            releases/cnpg-${{ env.VERSION }}.sigstore.json
           make_latest: ${{ needs.check-version.outputs.is_latest == 'true' && needs.check-version.outputs.is_stable == 'true' }}
           prerelease: ${{ needs.check-version.outputs.is_stable == 'false' || needs.check-version.outputs.is_rc == 'true' }}
         env:
@@ -111,13 +125,13 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # To identify the commit we need the history and all the tags.
           fetch-depth: 0
       -
         name: Install Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: ${{ env.GOLANG_VERSION }}
           check-latest: true
@@ -178,7 +192,7 @@ jobs:
         if: |
           needs.check-version.outputs.is_latest == 'true' &&
           needs.check-version.outputs.is_stable == 'true'
-        uses: rajatjindal/krew-release-bot@3d9faef30a82761d610544f62afddca00993eef9 # v0.0.47
+        uses: rajatjindal/krew-release-bot@a7e82ae57ca41a16fca2691ef00e8a8d35bc77d4 # v0.0.50
         with:
           krew_template_file: dist/krew/cnpg.yaml
       -
@@ -198,7 +212,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       -
         name: Login to ghcr.io
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -208,6 +222,7 @@ jobs:
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         id: bake-push
         env:
+          BUILDX_METADATA_PROVENANCE: disabled
           environment: "production"
           buildVersion: ${{ env.VERSION }}
           tag: ${{ env.IMAGE_TAG }}
@@ -261,7 +276,7 @@ jobs:
       )
     steps:
       - name: Checkout code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
@@ -271,7 +286,7 @@ jobs:
           platforms: ${{ needs.release-binaries.outputs.platforms }}
 
       - name: Install Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6
         with:
           go-version: ${{ env.GOLANG_VERSION }}
           check-latest: true
@@ -280,7 +295,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to ghcr.io
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -324,7 +339,7 @@ jobs:
       VERSION: ${{ needs.release-binaries.outputs.version }}
     steps:
       - name: Checkout community-operators
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: k8s-operatorhub/community-operators
           fetch-depth: 0
@@ -342,7 +357,7 @@ jobs:
           rm -fr cloudnative-pg-catalog.yaml bundle.Dockerfile *.zip bundle/
 
       - name: Create Remote Pull Request
-        uses: peter-evans/create-pull-request@98357b18bf14b5342f975ff684046ec3b2a07725 # v8
+        uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0 # v8
         with:
           token: ${{ secrets.REPO_GHA_PAT }}
           commit-message: "operator cloudnative-pg (${{ env.VERSION }})"
@@ -401,7 +416,7 @@ jobs:
     steps:
       -
         name: Checkout artifact
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: cloudnative-pg/artifacts
           token: ${{ secrets.REPO_GHA_PAT }}

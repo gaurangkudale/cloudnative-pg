@@ -40,7 +40,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -60,7 +59,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres/replication"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/promotiontoken"
-	externalcluster "github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/replicaclusterswitch"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/replicaclusterswitch/conditions"
 	clusterstatus "github.com/cloudnative-pg/cloudnative-pg/pkg/resources/status"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/system"
 )
@@ -140,8 +139,7 @@ func (r *InstanceReconciler) Reconcile(
 	ctx = cnpgiclient.SetPluginClientInContext(ctx, pluginClient)
 	ctx = cluster.SetInContext(ctx)
 
-	// Reconcile PostgreSQL instance parameters
-	r.reconcileInstance(cluster)
+	r.instance.SetCluster(cluster)
 
 	// Takes care of the `.check-empty-wal-archive` file
 	if err := r.reconcileCheckWalArchiveFile(cluster); err != nil {
@@ -980,33 +978,6 @@ func (r *InstanceReconciler) reconcileMonitoringQueries(
 	r.metricsServerExporter.SetCustomQueries(queriesCollector)
 }
 
-// reconcileInstance sets PostgreSQL instance parameters to current values
-func (r *InstanceReconciler) reconcileInstance(cluster *apiv1.Cluster) {
-	detectRequiresDesignatedPrimaryTransition := func() bool {
-		if !cluster.IsReplica() {
-			return false
-		}
-
-		if !externalcluster.IsDesignatedPrimaryTransitionRequested(cluster) {
-			return false
-		}
-
-		if !r.instance.IsFenced() && !r.instance.MightBeUnavailable() {
-			return false
-		}
-
-		isPrimary, _ := r.instance.IsPrimary()
-		return isPrimary
-	}
-
-	r.instance.PgCtlTimeoutForPromotion = cluster.GetPgCtlTimeoutForPromotion()
-	r.instance.MaxSwitchoverDelay = cluster.GetMaxSwitchoverDelay()
-	r.instance.MaxStopDelay = cluster.GetMaxStopDelay()
-	r.instance.SmartStopDelay = cluster.GetSmartShutdownTimeout()
-	r.instance.RequiresDesignatedPrimaryTransition = detectRequiresDesignatedPrimaryTransition()
-	r.instance.Cluster = cluster
-}
-
 // PostgreSQLAutoConfWritable reconciles the permissions bit of `postgresql.auto.conf`
 // given the relative setting in `.spec.postgresql.enableAlterSystem`
 func (r *InstanceReconciler) reconcilePostgreSQLAutoConfFilePermissions(ctx context.Context, cluster *apiv1.Cluster) {
@@ -1063,12 +1034,22 @@ func (r *InstanceReconciler) processConfigReloadAndManageRestart(ctx context.Con
 		return nil
 	}
 
-	// if there is a pending restart, the instance is a primary and
-	// the restart is due to a decrease of sensible parameters,
-	// we will need to restart the primary instance in place
+	// if there is a pending restart, the instance is a primary (or the designated
+	// primary in a replica cluster) and the restart is due to a decrease of sensible
+	// parameters, we will need to restart the primary instance in place
 	phase := apiv1.PhaseApplyingConfiguration
 	phaseReason := "PostgreSQL configuration changed"
-	if status.IsPrimary && status.PendingRestartForDecrease {
+
+	// In a replica cluster, the designated primary acts as the local primary.
+	// It should handle hot-standby sensitive parameter decreases the same way
+	// a real primary would, triggering an in-place restart.
+	isDesignatedPrimary := cluster.IsReplica() &&
+		cluster.Status.CurrentPrimary == r.instance.GetPodName()
+	// Determine the local acting primary instance in cluster, which is either
+	// the real primary or a designated primary
+	isActingPrimary := status.IsPrimary || isDesignatedPrimary
+
+	if isActingPrimary && status.PendingRestartForDecrease {
 		if cluster.GetPrimaryUpdateStrategy() == apiv1.PrimaryUpdateStrategyUnsupervised {
 			return r.triggerRestartForDecrease(ctx, cluster)
 		}
@@ -1081,7 +1062,7 @@ func (r *InstanceReconciler) processConfigReloadAndManageRestart(ctx context.Con
 	}
 	if phase == apiv1.PhaseApplyingConfiguration &&
 		(cluster.Status.Phase == apiv1.PhaseApplyingConfiguration ||
-			(status.IsPrimary && cluster.Spec.Instances > 1)) {
+			(isActingPrimary && cluster.Spec.Instances > 1)) {
 		// I'm not the first instance spotting the configuration
 		// change, everything is fine and there is no need to signal
 		// the operator again.
@@ -1213,7 +1194,8 @@ func (r *InstanceReconciler) reconcileDesignatedPrimary(
 	cluster *apiv1.Cluster,
 ) (changed bool, err error) {
 	// If I'm already the current designated primary everything is ok.
-	if cluster.Status.CurrentPrimary == r.instance.GetPodName() && !r.instance.RequiresDesignatedPrimaryTransition {
+	if cluster.Status.CurrentPrimary == r.instance.GetPodName() &&
+		!r.instance.RequiresDesignatedPrimaryTransition() {
 		return false, nil
 	}
 
@@ -1226,25 +1208,12 @@ func (r *InstanceReconciler) reconcileDesignatedPrimary(
 	// I'm the primary, need to inform the operator
 	log.FromContext(ctx).Info("Setting myself as the current designated primary")
 
-	return changed, retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		var livingCluster apiv1.Cluster
-
-		err := r.client.Get(ctx, client.ObjectKeyFromObject(cluster), &livingCluster)
-		if err != nil {
-			return err
-		}
-
-		updatedCluster := livingCluster.DeepCopy()
-		updatedCluster.Status.CurrentPrimary = r.instance.GetPodName()
-		updatedCluster.Status.CurrentPrimaryTimestamp = pgTime.GetCurrentTimestamp()
-		if r.instance.RequiresDesignatedPrimaryTransition {
-			externalcluster.SetDesignatedPrimaryTransitionCompleted(updatedCluster)
-		}
-
-		cluster.Status = updatedCluster.Status
-
-		return r.client.Status().Update(ctx, updatedCluster)
-	})
+	cluster.Status.CurrentPrimary = r.instance.GetPodName()
+	cluster.Status.CurrentPrimaryTimestamp = pgTime.GetCurrentTimestamp()
+	if r.instance.RequiresDesignatedPrimaryTransition() {
+		conditions.SetDesignatedPrimaryTransitionCompleted(cluster)
+	}
+	return changed, r.client.Status().Update(ctx, cluster)
 }
 
 // waitForWalReceiverDown wait until the wal receiver is down, and it's used
@@ -1338,7 +1307,7 @@ func (r *InstanceReconciler) reconcileUser(ctx context.Context, username string,
 		return fmt.Errorf("wrong username '%v' in secret, expected '%v'", usernameFromSecret, username)
 	}
 
-	err = postgresutils.SetUserPassword(username, password, db)
+	err = postgresutils.SetUserPassword(ctx, username, password, db)
 	if err != nil {
 		return err
 	}

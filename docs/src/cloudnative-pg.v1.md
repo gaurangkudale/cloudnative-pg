@@ -576,7 +576,7 @@ _Appears in:_
 | `minSyncReplicas` _integer_ | Minimum number of instances required in synchronous replication with the<br />primary. Undefined or 0 allow writes to complete when no standby is<br />available. |  | 0 | Minimum: 0 <br /> |
 | `maxSyncReplicas` _integer_ | The target value for the synchronous replication quorum, that can be<br />decreased if the number of ready standbys is lower than this.<br />Undefined or 0 disable synchronous replication. |  | 0 | Minimum: 0 <br /> |
 | `postgresql` _[PostgresConfiguration](#postgresconfiguration)_ | Configuration of the PostgreSQL server |  |  |  |
-| `replicationSlots` _[ReplicationSlotsConfiguration](#replicationslotsconfiguration)_ | Replication slots management configuration |  | \{ highAvailability:map[enabled:true] \} |  |
+| `replicationSlots` _[ReplicationSlotsConfiguration](#replicationslotsconfiguration)_ | Replication slots management configuration |  | \{ highAvailability\: \{ enabled:true \} \} |  |
 | `bootstrap` _[BootstrapConfiguration](#bootstrapconfiguration)_ | Instructions to bootstrap this cluster |  |  |  |
 | `replica` _[ReplicaClusterConfiguration](#replicaclusterconfiguration)_ | Replica cluster configuration |  |  |  |
 | `superuserSecret` _[LocalObjectReference](https://pkg.go.dev/github.com/cloudnative-pg/machinery/pkg/api#LocalObjectReference)_ | The secret containing the superuser password. If not defined a new<br />secret will be created with a randomly generated password |  |  |  |
@@ -984,7 +984,7 @@ _Appears in:_
 
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
-| `name` _string_ | The name of the extension, required | True |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
+| `name` _string_ | The name of the extension, required | True |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9_]*[a-z0-9])?$` <br /> |
 | `image` _[ImageVolumeSource](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#imagevolumesource-v1-core)_ | The image containing the extension, required | True |  |  |
 | `extension_control_path` _string array_ | The list of directories inside the image which should be added to extension_control_path.<br />If not defined, defaults to "/share". |  |  |  |
 | `dynamic_library_path` _string array_ | The list of directories inside the image which should be added to dynamic_library_path.<br />If not defined, defaults to "/lib". |  |  |  |
@@ -1239,6 +1239,7 @@ _Appears in:_
 | --- | --- | --- | --- | --- |
 | `podName` _string_ | The pod name |  |  |  |
 | `ContainerID` _string_ | The container ID |  |  |  |
+| `sessionID` _string_ | The instance manager session ID. This is a unique identifier generated at instance manager<br />startup and changes on every restart (including container reboots). Used to detect if<br />the instance manager was restarted during long-running operations like backups, which<br />would terminate any running backup process. |  |  |  |
 
 
 #### InstanceReportedState
@@ -1956,8 +1957,9 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-PrimaryUpdateMethod contains the method to use when upgrading
-the primary server of the cluster as part of rolling updates
+PrimaryUpdateMethod defines the method to use when upgrading
+the primary instance of the cluster as part of rolling updates.
+The default method is "restart"
 
 
 
