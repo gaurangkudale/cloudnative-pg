@@ -1188,6 +1188,7 @@ pgbouncerspec
 pgdata
 pgpass
 pgstatstatements
+pgvector
 phaseReason
 pid
 pinger
@@ -1405,6 +1406,7 @@ sigs
 sigstore
 singlenamespace
 slotPrefix
+slsa
 smartShutdownTimeout
 snapshotBackupStatus
 snapshotOwnerReference
